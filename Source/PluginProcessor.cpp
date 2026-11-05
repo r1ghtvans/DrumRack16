@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <cmath>
+#include <limits>
 
 juce::AudioProcessor::BusesProperties DrumRackProcessor::makeBuses()
 {
@@ -47,6 +48,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumRackProcessor::createLay
 
         layout.add (std::make_unique<AudioParameterInt> (
             ParameterID { "choke" + id, 1 }, n + "Choke Group", 0, 8, 0));
+
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { "loop" + id, 1 }, n + "Loop", loopChoices(), 0));
+
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "loopstart" + id, 1 }, n + "Loop Start",
+            NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "loopend" + id, 1 }, n + "Loop End",
+            NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { "rate" + id, 1 }, n + "Rate", rateChoices(), 2));
+
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { "step" + id, 1 }, n + "Ratchet Step", stepChoices(), 2));
+
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { "fade" + id, 1 }, n + "Ratchet Fade",
+            NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.0f));
     }
 
     return layout;
@@ -63,6 +85,7 @@ DrumRackProcessor::DrumRackProcessor()
         padNote[i].store (firstNote + i);
         hitCounter[i].store (0);
         guiTrigger[i].store (0.0f);
+        guiRelease[i].store (false);
 
         const juce::String id = juce::String (i);
         volP[i]   = apvts.getRawParameterValue ("vol" + id);
@@ -71,6 +94,12 @@ DrumRackProcessor::DrumRackProcessor()
         startP[i] = apvts.getRawParameterValue ("start" + id);
         endP[i]   = apvts.getRawParameterValue ("end" + id);
         chokeP[i] = apvts.getRawParameterValue ("choke" + id);
+        loopP[i]      = apvts.getRawParameterValue ("loop" + id);
+        loopStartP[i] = apvts.getRawParameterValue ("loopstart" + id);
+        loopEndP[i]   = apvts.getRawParameterValue ("loopend" + id);
+        rateP[i]      = apvts.getRawParameterValue ("rate" + id);
+        stepP[i]      = apvts.getRawParameterValue ("step" + id);
+        fadeP[i]      = apvts.getRawParameterValue ("fade" + id);
     }
 }
 
@@ -80,6 +109,15 @@ void DrumRackProcessor::prepareToPlay (double sampleRate, int)
 
     for (auto& v : voices)
         v = Voice();
+
+    for (auto& p : pending)
+        p = Pending();
+
+    for (auto& h : hitCount)
+        h = 0;
+
+    sampleCounter = 0;
+    currentAbs = 0;
 }
 
 bool DrumRackProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -119,6 +157,94 @@ void DrumRackProcessor::startVoice (int p, float velocity)
     v.pos = (double) juce::jlimit (0.0f, 1.0f, startP[p]->load()) * data->buffer.getNumSamples();
 }
 
+void DrumRackProcessor::releaseLoop (int p)
+{
+    if (voices[p].active && loopP[p]->load() >= 0.5f)
+        voices[p].choking = true;
+}
+
+void DrumRackProcessor::addPending (int p, float velocity, juce::int64 due)
+{
+    for (auto& e : pending)
+    {
+        if (! e.active)
+        {
+            e.active = true;
+            e.pad = p;
+            e.velocity = velocity;
+            e.due = due;
+            return;
+        }
+    }
+    // очередь заполнена: лишние повторы просто не играем
+}
+
+void DrumRackProcessor::firePending (juce::int64 now)
+{
+    for (auto& e : pending)
+    {
+        if (e.active && e.due <= now)
+        {
+            e.active = false;
+            startVoice (e.pad, e.velocity);
+        }
+    }
+}
+
+juce::int64 DrumRackProcessor::nextPendingDue() const
+{
+    juce::int64 best = std::numeric_limits<juce::int64>::max();
+
+    for (const auto& e : pending)
+        if (e.active && e.due < best)
+            best = e.due;
+
+    return best;
+}
+
+// Rate: /4 и /2 пропускают удары, x2 и x4 делят удар на повторы (ratchet).
+// В режиме Loop параметр Rate не используется.
+void DrumRackProcessor::triggerHit (int p, float velocity)
+{
+    if (loopP[p]->load() >= 0.5f)
+    {
+        startVoice (p, velocity);
+        return;
+    }
+
+    const int rate = juce::jlimit (0, 4, (int) std::lround (rateP[p]->load()));
+
+    if (rate < 2)
+    {
+        const int div = (rate == 0) ? 4 : 2;
+        const bool play = (hitCount[p] == 0);
+        hitCount[p] = (hitCount[p] + 1) % div;
+
+        if (play)
+            startVoice (p, velocity);
+        return;
+    }
+
+    const int n = (rate == 3) ? 2 : (rate == 4 ? 4 : 1);
+    startVoice (p, velocity);
+
+    if (n == 1)
+        return;
+
+    static const double stepBeats[4] = { 1.0, 0.5, 0.25, 0.125 };
+    const int stepIndex = juce::jlimit (0, 3, (int) std::lround (stepP[p]->load()));
+    const double stepSamples = stepBeats[stepIndex] * 60.0 / bpm * currentSampleRate;
+    const double spacing = stepSamples / (double) n;
+    const float fade = juce::jlimit (0.0f, 1.0f, fadeP[p]->load());
+
+    for (int k = 1; k < n; ++k)
+    {
+        const auto offset = juce::jmax<juce::int64> (1, (juce::int64) std::llround (spacing * (double) k));
+        const float vel = velocity * (1.0f - fade * (float) k / (float) n);
+        addPending (p, vel, currentAbs + offset);
+    }
+}
+
 void DrumRackProcessor::handleMidi (const juce::MidiMessage& m)
 {
     // MIDI-канал специально игнорируем: пэды MPK Mini шлют на канале 10, клавиши на канале 1
@@ -139,21 +265,38 @@ void DrumRackProcessor::handleMidi (const juce::MidiMessage& m)
 
         for (int p = 0; p < numPads; ++p)
             if (padNote[p].load() == note)
-                startVoice (p, vel);
+                triggerHit (p, vel);
+    }
+    else if (m.isNoteOff())
+    {
+        // Note Off нужен только режиму Loop; в one-shot он игнорируется
+        const int note = m.getNoteNumber();
+
+        for (int p = 0; p < numPads; ++p)
+            if (padNote[p].load() == note)
+                releaseLoop (p);
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
         for (auto& v : voices)
             if (v.active)
                 v.choking = true;
+
+        for (auto& e : pending)
+            e.active = false;
     }
-    // Note Off игнорируем: это one-shot драм-машина
 }
 
 void DrumRackProcessor::previewPad (int pad, float velocity)
 {
     if (juce::isPositiveAndBelow (pad, numPads))
         guiTrigger[pad].store (velocity);
+}
+
+void DrumRackProcessor::previewRelease (int pad)
+{
+    if (juce::isPositiveAndBelow (pad, numPads))
+        guiRelease[pad].store (true);
 }
 
 // ------------------------------------------------------------------ звук
@@ -211,6 +354,13 @@ void DrumRackProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start
         const double ratio = (data->sampleRate / currentSampleRate)
                              * std::pow (2.0, (double) pitchP[p]->load() / 12.0);
 
+        bool loop = loopP[p]->load() >= 0.5f;
+        const double loopStart = (double) juce::jlimit (0.0f, 1.0f, loopStartP[p]->load()) * len;
+        const double loopEnd = juce::jmin ((double) (len - 1),
+                                           (double) juce::jlimit (0.0f, 1.0f, loopEndP[p]->load()) * len);
+        if (loopEnd - loopStart < 16.0)
+            loop = false;   // слишком короткая петля не имеет смысла
+
         const double startPos = (double) juce::jlimit (0.0f, 1.0f, startP[p]->load()) * len;
         double endPos = (double) juce::jlimit (0.0f, 1.0f, endP[p]->load()) * len;
         endPos = juce::jlimit (startPos + 1.0, (double) (len - 1), endPos);
@@ -220,7 +370,12 @@ void DrumRackProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start
 
         for (int i = 0; i < n; ++i)
         {
-            if (v.pos >= endPos)
+            if (loop)
+            {
+                if (v.pos >= loopEnd)
+                    v.pos = loopStart + std::fmod (v.pos - loopStart, loopEnd - loopStart);
+            }
+            else if (v.pos >= endPos)
             {
                 v.active = false;
                 break;
@@ -235,9 +390,12 @@ void DrumRackProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start
 
             float g = gain * v.velocity * v.chokeGain;
 
-            const double toEnd = endPos - v.pos;
-            if (toEnd < 32.0)                       // короткий фейд на обрезанном конце
-                g *= (float) (toEnd / 32.0);
+            if (! loop)
+            {
+                const double toEnd = endPos - v.pos;
+                if (toEnd < 32.0)                   // короткий фейд на обрезанном конце
+                    g *= (float) (toEnd / 32.0);
+            }
 
             if (v.choking)
             {
@@ -266,30 +424,64 @@ void DrumRackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         buffer.clear (ch, 0, numSamples);
 
-    // клики мышью по пэдам из интерфейса
+    // темп проекта (нужен для Ratchet Step)
+    if (auto* ph = getPlayHead())
+        if (auto info = ph->getPosition())
+            if (auto b = info->getBpm())
+                if (*b > 20.0)
+                    bpm = *b;
+
+    const juce::int64 blockStart = sampleCounter;
+    currentAbs = blockStart;
+
+    // нажатия и отпускания мышью из интерфейса
     for (int p = 0; p < numPads; ++p)
     {
         const float vel = guiTrigger[p].exchange (0.0f);
         if (vel > 0.0f)
-            startVoice (p, vel);
+            triggerHit (p, vel);
+
+        if (guiRelease[p].exchange (false))
+            releaseLoop (p);
     }
 
-    // MIDI с точностью до сэмпла
+    // MIDI и запланированные повторы обрабатываем с точностью до сэмпла
+    auto it = midi.begin();
+    const auto endIt = midi.end();
     int pos = 0;
-    for (const auto metadata : midi)
-    {
-        const int eventPos = juce::jlimit (0, numSamples, metadata.samplePosition);
 
-        if (eventPos > pos)
+    for (;;)
+    {
+        currentAbs = blockStart + pos;
+
+        while (it != endIt && juce::jlimit (0, numSamples, (*it).samplePosition) <= pos)
         {
-            renderRange (buffer, pos, eventPos);
-            pos = eventPos;
+            handleMidi ((*it).getMessage());
+            ++it;
         }
 
-        handleMidi (metadata.getMessage());
+        firePending (currentAbs);
+
+        if (pos >= numSamples)
+            break;
+
+        int next = numSamples;
+
+        if (it != endIt)
+            next = juce::jmin (next, juce::jmax (pos + 1, juce::jlimit (0, numSamples, (*it).samplePosition)));
+
+        const juce::int64 due = nextPendingDue();
+        if (due != std::numeric_limits<juce::int64>::max())
+        {
+            const juce::int64 rel = juce::jmax<juce::int64> ((juce::int64) pos + 1, due - blockStart);
+            next = (int) juce::jmin<juce::int64> ((juce::int64) next, rel);
+        }
+
+        renderRange (buffer, pos, next);
+        pos = next;
     }
 
-    renderRange (buffer, pos, numSamples);
+    sampleCounter += numSamples;
     midi.clear();
 }
 

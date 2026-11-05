@@ -42,6 +42,21 @@ public:
         g.drawFittedText (name.isEmpty() ? "drop sample" : name,
                           getLocalBounds().reduced (8, 0).withTrimmedTop (26),
                           juce::Justification::centred, 2);
+
+        // метки режима: LOOP и множитель ритма
+        const auto id = juce::String (index);
+        const bool loop = owner.proc.apvts.getRawParameterValue ("loop" + id)->load() >= 0.5f;
+        const int rate = (int) std::lround (owner.proc.apvts.getRawParameterValue ("rate" + id)->load());
+        static const char* rateText[5] = { "/4", "/2", "", "x2", "x4" };
+
+        juce::String tag = loop ? juce::String ("LOOP") : juce::String (rateText[juce::jlimit (0, 4, rate)]);
+
+        if (tag.isNotEmpty())
+        {
+            g.setColour (accent);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            g.drawText (tag, r.reduced (8.0f).removeFromBottom (16.0f), juce::Justification::bottomRight);
+        }
     }
 
     void mouseDown (const juce::MouseEvent&) override
@@ -49,6 +64,8 @@ public:
         owner.selectPad (index);
         owner.proc.previewPad (index, 0.8f);
     }
+
+    void mouseUp (const juce::MouseEvent&) override { owner.proc.previewRelease (index); }
 
     void mouseDoubleClick (const juce::MouseEvent&) override { owner.browseForSample(); }
 
@@ -114,32 +131,56 @@ DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
     setupSlider (pitchSlider, pitchLabel, "Pitch",       " st");
     setupSlider (startSlider, startLabel, "Start",       "");
     setupSlider (endSlider,   endLabel,   "End",         "");
-    setupSlider (chokeSlider, chokeLabel, "Choke group", "");
+    setupSlider (chokeSlider, chokeLabel, "Choke group (0 = off)", "");
+
+    setupCombo  (loopBox, loopLabel, "Loop mode", DrumRackProcessor::loopChoices());
+    setupSlider (loopStartSlider, loopStartLabel, "Loop start", "");
+    setupSlider (loopEndSlider,   loopEndLabel,   "Loop end",   "");
+    setupCombo  (rateBox, rateLabel, "MIDI rate", DrumRackProcessor::rateChoices());
+    setupCombo  (stepBox, stepLabel, "Ratchet step (x2 / x4)", DrumRackProcessor::stepChoices());
+    setupSlider (fadeSlider, fadeLabel, "Ratchet fade", "");
 
     selectPad (0);
-    setSize (780, 470);
+    setSize (960, 480);
     startTimerHz (30);
 }
 
 DrumRackEditor::~DrumRackEditor()
 {
     stopTimer();
+    resetAttachments();
+}
 
-    // слайдеры отвязываем до их уничтожения
+void DrumRackEditor::resetAttachments()
+{
     volA.reset(); panA.reset(); pitchA.reset(); startA.reset(); endA.reset(); chokeA.reset();
+    loopStartA.reset(); loopEndA.reset(); fadeA.reset();
+    loopA.reset(); rateA.reset(); stepA.reset();
 }
 
 void DrumRackEditor::setupSlider (juce::Slider& s, juce::Label& l, const juce::String& text, const juce::String& suffix)
 {
     s.setSliderStyle (juce::Slider::LinearHorizontal);
-    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 20);
+    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 60, 20);
     s.setTextValueSuffix (suffix);
     s.setColour (juce::Slider::trackColourId, accent);
     s.setColour (juce::Slider::thumbColourId, juce::Colours::white);
     addAndMakeVisible (s);
 
     l.setText (text, juce::dontSendNotification);
-    l.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.8f));
+    l.setFont (juce::FontOptions (12.0f));
+    l.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
+    addAndMakeVisible (l);
+}
+
+void DrumRackEditor::setupCombo (juce::ComboBox& b, juce::Label& l, const juce::String& text, const juce::StringArray& items)
+{
+    b.addItemList (items, 1);
+    addAndMakeVisible (b);
+
+    l.setText (text, juce::dontSendNotification);
+    l.setFont (juce::FontOptions (12.0f));
+    l.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
     addAndMakeVisible (l);
 }
 
@@ -154,15 +195,22 @@ void DrumRackEditor::selectPad (int index)
         learnButton.setToggleState (false, juce::dontSendNotification);
     }
 
-    volA.reset(); panA.reset(); pitchA.reset(); startA.reset(); endA.reset(); chokeA.reset();
+    resetAttachments();
 
     const auto id = juce::String (selected);
-    volA   = std::make_unique<Attachment> (proc.apvts, "vol"   + id, volSlider);
-    panA   = std::make_unique<Attachment> (proc.apvts, "pan"   + id, panSlider);
-    pitchA = std::make_unique<Attachment> (proc.apvts, "pitch" + id, pitchSlider);
-    startA = std::make_unique<Attachment> (proc.apvts, "start" + id, startSlider);
-    endA   = std::make_unique<Attachment> (proc.apvts, "end"   + id, endSlider);
-    chokeA = std::make_unique<Attachment> (proc.apvts, "choke" + id, chokeSlider);
+    volA   = std::make_unique<SliderAttachment> (proc.apvts, "vol"   + id, volSlider);
+    panA   = std::make_unique<SliderAttachment> (proc.apvts, "pan"   + id, panSlider);
+    pitchA = std::make_unique<SliderAttachment> (proc.apvts, "pitch" + id, pitchSlider);
+    startA = std::make_unique<SliderAttachment> (proc.apvts, "start" + id, startSlider);
+    endA   = std::make_unique<SliderAttachment> (proc.apvts, "end"   + id, endSlider);
+    chokeA = std::make_unique<SliderAttachment> (proc.apvts, "choke" + id, chokeSlider);
+
+    loopA      = std::make_unique<ComboAttachment>  (proc.apvts, "loop"      + id, loopBox);
+    loopStartA = std::make_unique<SliderAttachment> (proc.apvts, "loopstart" + id, loopStartSlider);
+    loopEndA   = std::make_unique<SliderAttachment> (proc.apvts, "loopend"   + id, loopEndSlider);
+    rateA      = std::make_unique<ComboAttachment>  (proc.apvts, "rate"      + id, rateBox);
+    stepA      = std::make_unique<ComboAttachment>  (proc.apvts, "step"      + id, stepBox);
+    fadeA      = std::make_unique<SliderAttachment> (proc.apvts, "fade"      + id, fadeSlider);
 
     for (int i = 0; i < DrumRackProcessor::numPads; ++i)
         pads[i]->isSelected = (i == selected);
@@ -266,21 +314,33 @@ void DrumRackEditor::resized()
     buttons.removeFromLeft (8);
     clearButton.setBounds (buttons.removeFromLeft (70));
     buttons.removeFromLeft (8);
-    learnButton.setBounds (buttons);
+    learnButton.setBounds (buttons.removeFromLeft (110));
 
-    area.removeFromTop (16);
+    area.removeFromTop (14);
 
-    auto row = [&area] (juce::Label& l, juce::Slider& s)
+    // две колонки
+    auto colA = area.removeFromLeft ((area.getWidth() - 16) / 2);
+    area.removeFromLeft (16);
+    auto colB = area;
+
+    auto place = [] (juce::Rectangle<int>& col, juce::Label& l, juce::Component& c)
     {
-        auto r = area.removeFromTop (38);
-        l.setBounds (r.removeFromLeft (90));
-        s.setBounds (r);
+        auto row = col.removeFromTop (48);
+        l.setBounds (row.removeFromTop (16));
+        c.setBounds (row.removeFromTop (26));
     };
 
-    row (volLabel, volSlider);
-    row (panLabel, panSlider);
-    row (pitchLabel, pitchSlider);
-    row (startLabel, startSlider);
-    row (endLabel, endSlider);
-    row (chokeLabel, chokeSlider);
+    place (colA, volLabel,   volSlider);
+    place (colA, panLabel,   panSlider);
+    place (colA, pitchLabel, pitchSlider);
+    place (colA, startLabel, startSlider);
+    place (colA, endLabel,   endSlider);
+    place (colA, chokeLabel, chokeSlider);
+
+    place (colB, loopLabel,      loopBox);
+    place (colB, loopStartLabel, loopStartSlider);
+    place (colB, loopEndLabel,   loopEndSlider);
+    place (colB, rateLabel,      rateBox);
+    place (colB, stepLabel,      stepBox);
+    place (colB, fadeLabel,      fadeSlider);
 }

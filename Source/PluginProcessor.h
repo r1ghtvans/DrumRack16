@@ -48,7 +48,12 @@ public:
     bool loadSample (int pad, const juce::File& file);
     void clearSample (int pad);
     juce::String getSampleName (int pad) const;
-    void previewPad (int pad, float velocity);   // клик мышью по пэду
+    void previewPad (int pad, float velocity);   // нажатие мышью на пэд
+    void previewRelease (int pad);               // отпускание мыши (для режима Loop)
+
+    static juce::StringArray loopChoices() { return { "Off", "Loop" }; }
+    static juce::StringArray rateChoices() { return { "/4 (every 4th hit)", "/2 (every 2nd hit)", "x1 (normal)", "x2 (double)", "x4 (quadruple)" }; }
+    static juce::StringArray stepChoices() { return { "1/4", "1/8", "1/16", "1/32" }; }
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -70,8 +75,21 @@ private:
     static BusesProperties makeBuses();
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
+    struct Pending
+    {
+        bool active = false;
+        int pad = 0;
+        float velocity = 1.0f;
+        juce::int64 due = 0;
+    };
+
     void handleMidi (const juce::MidiMessage& m);
-    void startVoice (int pad, float velocity);
+    void triggerHit (int pad, float velocity);      // учитывает Loop и Rate
+    void startVoice (int pad, float velocity);      // запускает звук сразу
+    void releaseLoop (int pad);
+    void addPending (int pad, float velocity, juce::int64 due);
+    void firePending (juce::int64 now);
+    juce::int64 nextPendingDue() const;
     void renderRange (juce::AudioBuffer<float>& buffer, int startSample, int endSample);
 
     Voice  voices[numPads];
@@ -87,8 +105,22 @@ private:
     std::atomic<float>* startP[numPads] {};
     std::atomic<float>* endP[numPads]   {};
     std::atomic<float>* chokeP[numPads] {};
+    std::atomic<float>* loopP[numPads]      {};
+    std::atomic<float>* loopStartP[numPads] {};
+    std::atomic<float>* loopEndP[numPads]   {};
+    std::atomic<float>* rateP[numPads]      {};
+    std::atomic<float>* stepP[numPads]      {};
+    std::atomic<float>* fadeP[numPads]      {};
+
+    static constexpr int maxPending = 128;
+    Pending pending[maxPending];
+    int hitCount[numPads] {};
+    juce::int64 sampleCounter = 0;   // сколько сэмплов прошло с начала работы
+    juce::int64 currentAbs = 0;      // текущая позиция внутри блока в тех же единицах
+    double bpm = 120.0;
 
     std::atomic<float> guiTrigger[numPads];
+    std::atomic<bool>  guiRelease[numPads];
 
     juce::AudioFormatManager formatManager;
 
