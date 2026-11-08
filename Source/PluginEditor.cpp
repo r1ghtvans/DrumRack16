@@ -1,64 +1,73 @@
 #include "PluginEditor.h"
 
 //==============================================================================
+// форматирование значений
+static juce::String fmtDb (double v)    { return v <= -59.9 ? juce::String ("-inf dB") : juce::String (v, 1) + " dB"; }
+static juce::String fmtPan (double v)
+{
+    const int p = (int) std::lround (std::abs (v) * 100.0);
+    return p == 0 ? juce::String ("C") : (v < 0 ? juce::String ("L ") : juce::String ("R ")) + juce::String (p) + "%";
+}
+static juce::String fmtSt (double v)    { return (v > 0.004 ? juce::String ("+") : juce::String()) + juce::String (v, 1) + " st"; }
+static juce::String fmtPct (double v)   { return juce::String ((int) std::lround (v * 100.0)) + "%"; }
+static juce::String fmtChoke (double v) { const int g = (int) std::lround (v); return g == 0 ? juce::String ("off") : "G" + juce::String (g); }
+static juce::String fmtSwing (double v) { return juce::String ((int) std::lround (v)) + "%"; }
+static juce::String fmtLen (double v)   { return juce::String ((int) std::lround (v)); }
+
+//==============================================================================
 // Пэд на странице PADS
-class DrumRackEditor::PadComponent : public juce::Component,
-                                     public juce::FileDragAndDropTarget
+class DrumRackEditor::PadButton : public juce::Component,
+                                  public juce::FileDragAndDropTarget
 {
 public:
-    PadComponent (DrumRackEditor& o, int i) : owner (o), index (i) {}
+    PadButton (DrumRackEditor& o, int i) : owner (o), index (i) {}
 
     float flash = 0.0f;
     bool  isSelected = false;
 
     void paint (juce::Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (3.0f);
         const auto rowCol = pal::rowColour (index);
+        auto r = getLocalBounds().withTrimmedRight (4).withTrimmedBottom (4).reduced (1);
 
-        g.setColour (pal::cell.interpolatedWith (rowCol, flash));
-        g.fillRoundedRectangle (r, 8.0f);
+        const auto base = pal::paper.interpolatedWith (rowCol, 0.45f);
+        pixelBox (g, r, rowCol, base.interpolatedWith (rowCol, flash), 3, 3);
 
-        // цветная полоска сверху: цвет пэда совпадает с цветом строки в секвенсоре
-        g.setColour (rowCol.withAlpha (0.85f));
-        g.fillRoundedRectangle (r.withHeight (5.0f).reduced (10.0f, 0.0f).translated (0.0f, 6.0f), 2.5f);
+        if (isSelected)
+        {
+            g.setColour (pal::ink);
+            g.strokePath (steppedRect (r, 3, 2), juce::PathStrokeType (2.0f));
+        }
 
-        g.setColour (isSelected ? pal::blue : pal::edge);
-        g.drawRoundedRectangle (r, 8.0f, isSelected ? 2.5f : 1.0f);
-
-        const auto textCol = flash > 0.5f ? pal::onPastel : pal::text;
         const int note = owner.proc.padNote[index].load();
 
-        g.setColour (textCol);
-        g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
-        g.drawText (juce::String (index + 1), r.reduced (10.0f).withTrimmedTop (10.0f).removeFromTop (20.0f),
-                    juce::Justification::topLeft);
+        g.setColour (pal::ink);
+        g.setFont (pixelfont::title (9.0f));
+        g.drawText (juce::String (index + 1).paddedLeft ('0', 2), r.reduced (9, 8).removeFromTop (14),
+                    juce::Justification::topLeft, false);
 
-        g.setColour (textCol.withAlpha (0.6f));
-        g.setFont (juce::FontOptions (12.0f));
-        g.drawText (juce::MidiMessage::getMidiNoteName (note, true, true, 5),
-                    r.reduced (10.0f).withTrimmedTop (10.0f).removeFromTop (20.0f), juce::Justification::topRight);
+        g.setColour (pal::inkSoft);
+        g.setFont (pixelfont::vhs (20.0f));
+        g.drawText (juce::MidiMessage::getMidiNoteName (note, true, true, 5), r.reduced (9, 6).removeFromTop (18),
+                    juce::Justification::topRight, false);
 
-        auto name = owner.proc.getSampleName (index);
-        g.setColour (name.isEmpty() ? pal::textDim : textCol);
-        g.setFont (juce::FontOptions (12.0f));
-        g.drawFittedText (name.isEmpty() ? "drop sample" : name,
-                          getLocalBounds().reduced (8, 0).withTrimmedTop (34),
+        const auto name = owner.proc.getSampleName (index);
+        g.setColour (name.isEmpty() ? pal::inkSoft.withAlpha (0.6f) : pal::ink);
+        g.setFont (pixelfont::vhs (22.0f));
+        g.drawFittedText (name.isEmpty() ? "empty" : name, r.reduced (8, 0).withTrimmedTop (22).withTrimmedBottom (16),
                           juce::Justification::centred, 2);
 
-        // метки режима: LOOP и множитель ритма
         const auto id = juce::String (index);
         const bool loop = owner.proc.apvts.getRawParameterValue ("loop" + id)->load() >= 0.5f;
         const int rate = (int) std::lround (owner.proc.apvts.getRawParameterValue ("rate" + id)->load());
         static const char* rateText[5] = { "/4", "/2", "", "x2", "x4" };
-
         const juce::String tag = loop ? juce::String ("LOOP") : juce::String (rateText[juce::jlimit (0, 4, rate)]);
 
         if (tag.isNotEmpty())
         {
-            g.setColour (flash > 0.5f ? pal::onPastel : pal::khaki);
-            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            g.drawText (tag, r.reduced (10.0f).removeFromBottom (16.0f), juce::Justification::bottomRight);
+            g.setColour (pal::ink);
+            g.setFont (pixelfont::vhs (20.0f));
+            g.drawText (tag, r.reduced (9, 4).removeFromBottom (16), juce::Justification::bottomRight, false);
         }
     }
 
@@ -69,7 +78,6 @@ public:
     }
 
     void mouseUp (const juce::MouseEvent&) override { owner.proc.previewRelease (index); }
-
     void mouseDoubleClick (const juce::MouseEvent&) override { owner.browseForSample(); }
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override
@@ -109,51 +117,63 @@ public:
     {
         const int pattern = currentPattern();
         const int len = juce::jlimit (1, 16, (int) std::lround (proc.apvts.getRawParameterValue ("seqlen")->load()));
+        const int rh = rowHeight();
+        const int cw = cellWidth();
 
-        // номера долей сверху
-        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        // номера долей
+        g.setFont (pixelfont::vhs (20.0f));
+        g.setColour (pal::inkSoft);
         for (int beat = 0; beat < 4; ++beat)
-        {
-            const auto first = cellRect (0, beat * 4);
-            g.setColour (pal::textDim);
-            g.drawText (juce::String (beat + 1), (int) first.getX() + 4, 0, 30, rulerH, juce::Justification::centredLeft);
-        }
+            g.drawText (juce::String (beat + 1), cellX (beat * 4) + 2, 0, 30, rulerH, juce::Justification::centredLeft, false);
 
         for (int row = 0; row < 16; ++row)
         {
+            const int y = rulerH + row * rh;
             const auto rowCol = pal::rowColour (row);
             const auto name = proc.getSampleName (row);
 
-            // подпись строки
-            auto labelArea = juce::Rectangle<float> (0.0f, (float) rulerH + row * rowHeight(), (float) labelW - 8.0f, rowHeight());
+            if (row == owner.selected)
+            {
+                g.setColour (rowCol.withAlpha (0.45f));
+                g.fillRect (0, y, labelW - 6, rh - 1);
+            }
+
             g.setColour (rowCol);
-            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            g.drawText (juce::String (row + 1).paddedLeft ('0', 2), labelArea.withWidth (24.0f).toNearestInt(),
-                        juce::Justification::centredLeft);
-            g.setColour (name.isEmpty() ? pal::textDim : pal::text);
-            g.setFont (juce::FontOptions (12.0f));
-            g.drawText (name.isEmpty() ? "-" : name, labelArea.withTrimmedLeft (28.0f).toNearestInt(),
-                        juce::Justification::centredLeft, true);
+            g.fillRect (3, y + rh / 2 - 3, 6, 6);
+
+            g.setColour (pal::ink);
+            g.setFont (pixelfont::title (8.0f));
+            g.drawText (juce::String (row + 1).paddedLeft ('0', 2), 13, y, 20, rh, juce::Justification::centredLeft, false);
+
+            g.setColour (name.isEmpty() ? pal::inkSoft.withAlpha (0.55f) : pal::inkSoft);
+            g.setFont (pixelfont::vhs (19.0f));
+            g.drawText (name.isEmpty() ? "-" : name, 38, y, labelW - 48, rh, juce::Justification::centredLeft, true);
 
             for (int col = 0; col < 16; ++col)
             {
-                const auto r = cellRect (row, col).reduced (1.5f);
+                const juce::Rectangle<int> cell (cellX (col) + 1, y + 1, cw - 2, rh - 2);   // зазор 2 px между шагами
                 const bool on = proc.getStep (pattern, row, col);
                 const bool inRange = col < len;
 
-                juce::Colour fill = ((col / 4) % 2 == 0) ? pal::cell : pal::cellAlt;
+                auto fill = (col / 4) % 2 == 0 ? pal::track : pal::track.darker (0.05f);
                 if (on)
                     fill = rowCol;
 
-                g.setColour (inRange ? fill : fill.withAlpha (0.3f));
-                g.fillRoundedRectangle (r, 4.0f);
+                g.setColour (inRange ? fill : fill.withAlpha (0.35f));
+                g.fillRect (cell);
+
+                if (on && inRange)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.55f));
+                    g.fillRect (cell.getX(), cell.getY(), cell.getWidth(), 2);
+                }
 
                 if (col == playStep)
                 {
-                    g.setColour (pal::sand.withAlpha (on ? 0.35f : 0.18f));
-                    g.fillRoundedRectangle (r, 4.0f);
-                    g.setColour (pal::sand);
-                    g.drawRoundedRectangle (r, 4.0f, 1.5f);
+                    g.setColour (juce::Colours::white.withAlpha (0.35f));
+                    g.fillRect (cell);
+                    g.setColour (pal::ink);
+                    g.drawRect (cell, 2);
                 }
             }
         }
@@ -166,7 +186,7 @@ public:
 
         if (pt.x < labelW && pt.y >= rulerH)
         {
-            labelPad = juce::jlimit (0, 15, (int) ((pt.y - rulerH) / rowHeight()));
+            labelPad = juce::jlimit (0, 15, (pt.y - rulerH) / rowHeight());
             owner.selectPad (labelPad);
             proc.previewPad (labelPad, 0.8f);
             return;
@@ -211,9 +231,9 @@ public:
     }
 
 private:
-    static constexpr int labelW = 150;
-    static constexpr int rulerH = 20;
-    static constexpr int gapW = 8;
+    static constexpr int labelW = 112;
+    static constexpr int rulerH = 16;
+    static constexpr int gapW = 6;
 
     int currentPattern() const
     {
@@ -221,33 +241,23 @@ private:
                              (int) std::lround (proc.apvts.getRawParameterValue ("pattern")->load()));
     }
 
-    float rowHeight() const { return (float) (getHeight() - rulerH) / 16.0f; }
-    float cellWidth() const { return (float) (getWidth() - labelW - 3 * gapW) / 16.0f; }
-
-    juce::Rectangle<float> cellRect (int row, int col) const
-    {
-        const float x = (float) labelW + (float) col * cellWidth() + (float) (col / 4) * (float) gapW;
-        return { x, (float) rulerH + (float) row * rowHeight(), cellWidth(), rowHeight() };
-    }
+    int rowHeight() const { return juce::jmax (8, (getHeight() - rulerH) / 16); }
+    int cellWidth() const { return (getWidth() - labelW - 3 * gapW) / 16; }
+    int cellX (int col) const { return labelW + col * cellWidth() + (col / 4) * gapW; }
 
     bool cellAt (juce::Point<int> pt, int& row, int& col) const
     {
         if (pt.y < rulerH || pt.x < labelW)
             return false;
 
-        row = juce::jlimit (0, 15, (int) ((float) (pt.y - rulerH) / rowHeight()));
+        row = juce::jlimit (0, 15, (pt.y - rulerH) / rowHeight());
 
-        for (int c = 0; c < 16; ++c)
-        {
-            auto r = cellRect (row, c);
-            r.setWidth (r.getWidth() + (c % 4 == 3 ? (float) gapW : 0.0f));   // щель после группы тоже попадает в ближайший шаг
-
-            if (pt.x >= (int) r.getX() && pt.x < (int) r.getRight())
+        for (int c = 15; c >= 0; --c)
+            if (pt.x >= cellX (c))
             {
                 col = c;
                 return true;
             }
-        }
         return false;
     }
 
@@ -261,9 +271,19 @@ private:
 
 //==============================================================================
 DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
-    : AudioProcessorEditor (&p), proc (p)
+    : AudioProcessorEditor (&p), proc (p),
+      volRow ("Volume", fmtDb), panRow ("Pan", fmtPan), pitchRow ("Pitch", fmtSt),
+      startRow ("Start", fmtPct), endRow ("End", fmtPct), chokeRow ("Choke", fmtChoke),
+      loopChoice ("Loop", { "OFF", "LOOP" }, pal::lavender),
+      rateChoice ("Rate", { "/4", "/2", "x1", "x2", "x4" }, pal::lavender),
+      stepChoice ("Step", DrumRackProcessor::stepChoices(), pal::lavender),
+      loopStartRow ("Loop in", fmtPct), loopEndRow ("Loop out", fmtPct), fadeRow ("Fade", fmtPct),
+      patternChoice ("Pattern", DrumRackProcessor::patternChoices(), pal::sky),
+      swingRow ("Swing", fmtSwing), lenRow ("Length", fmtLen)
 {
     setLookAndFeel (&laf);
+    setOpaque (true);
+    setResizable (false, false);
 
     // --- вкладки ---
     addAndMakeVisible (padsTab);
@@ -271,159 +291,87 @@ DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
     padsTab.onClick = [this] { showPage (0); };
     seqTab.onClick  = [this] { showPage (1); };
 
-    brand.setText ("DRUMRACK16", juce::dontSendNotification);
-    brand.setFont (juce::FontOptions (13.0f, juce::Font::bold));
-    brand.setColour (juce::Label::textColourId, pal::khaki);
-    brand.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (brand);
-
     // --- страница PADS ---
     for (int i = 0; i < DrumRackProcessor::numPads; ++i)
     {
-        pads[i] = std::make_unique<PadComponent> (*this, i);
+        pads[i] = std::make_unique<PadButton> (*this, i);
         addAndMakeVisible (*pads[i]);
         padsPage.push_back (pads[i].get());
         lastHit[i] = proc.hitCounter[i].load();
     }
 
-    padTitle.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    padTitle.setColour (juce::Label::textColourId, pal::text);
-    addAndMakeVisible (padTitle);
-
-    noteInfo.setColour (juce::Label::textColourId, pal::textDim);
-    addAndMakeVisible (noteInfo);
-
-    addAndMakeVisible (loadButton);
-    addAndMakeVisible (clearButton);
-    addAndMakeVisible (learnButton);
-
-    learnButton.setClickingTogglesState (true);
-
-    loadButton.onClick  = [this] { browseForSample(); };
-    clearButton.onClick = [this] { proc.clearSample (selected); repaint(); };
-    learnButton.onClick = [this]
+    loadBtn.onClick  = [this] { browseForSample(); };
+    clearBtn.onClick = [this] { proc.clearSample (selected); repaint(); };
+    learnBtn.onClick = [this]
     {
         proc.learnPad.store (selected);
-        proc.learning.store (learnButton.getToggleState());
+        proc.learning.store (learnBtn.isOn());
     };
 
-    setupSlider (volSlider,   volLabel,   "Volume",      " dB");
-    setupSlider (panSlider,   panLabel,   "Pan",         "");
-    setupSlider (pitchSlider, pitchLabel, "Pitch",       " st");
-    setupSlider (startSlider, startLabel, "Start",       "");
-    setupSlider (endSlider,   endLabel,   "End",         "");
-    setupSlider (chokeSlider, chokeLabel, "Choke group (0 = off)", "");
-
-    setupCombo  (loopBox, loopLabel, "Loop mode", DrumRackProcessor::loopChoices());
-    setupSlider (loopStartSlider, loopStartLabel, "Loop start", "");
-    setupSlider (loopEndSlider,   loopEndLabel,   "Loop end",   "");
-    setupCombo  (rateBox, rateLabel, "MIDI rate", DrumRackProcessor::rateChoices());
-    setupCombo  (stepBox, stepLabel, "Ratchet step (x2 / x4)", DrumRackProcessor::stepChoices());
-    setupSlider (fadeSlider, fadeLabel, "Ratchet fade", "");
-
-    for (juce::Component* c : { (juce::Component*) &padTitle, (juce::Component*) &noteInfo,
-                                (juce::Component*) &loadButton, (juce::Component*) &clearButton,
-                                (juce::Component*) &learnButton,
-                                (juce::Component*) &volSlider, (juce::Component*) &panSlider,
-                                (juce::Component*) &pitchSlider, (juce::Component*) &startSlider,
-                                (juce::Component*) &endSlider, (juce::Component*) &chokeSlider,
-                                (juce::Component*) &volLabel, (juce::Component*) &panLabel,
-                                (juce::Component*) &pitchLabel, (juce::Component*) &startLabel,
-                                (juce::Component*) &endLabel, (juce::Component*) &chokeLabel,
-                                (juce::Component*) &loopBox, (juce::Component*) &rateBox,
-                                (juce::Component*) &stepBox, (juce::Component*) &loopStartSlider,
-                                (juce::Component*) &loopEndSlider, (juce::Component*) &fadeSlider,
-                                (juce::Component*) &loopLabel, (juce::Component*) &loopStartLabel,
-                                (juce::Component*) &loopEndLabel, (juce::Component*) &rateLabel,
-                                (juce::Component*) &stepLabel, (juce::Component*) &fadeLabel })
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &loadBtn, &clearBtn, &learnBtn,
+             &volRow, &panRow, &pitchRow, &startRow, &endRow, &chokeRow,
+             &loopChoice, &loopStartRow, &loopEndRow, &rateChoice, &stepChoice, &fadeRow })
+    {
+        addAndMakeVisible (c);
         padsPage.push_back (c);
+    }
 
     // --- страница SEQUENCER ---
     grid = std::make_unique<StepGrid> (*this);
-    addAndMakeVisible (*grid);
 
-    addAndMakeVisible (seqOnButton);
-    addAndMakeVisible (clearPatternButton);
-    seqOnButton.setClickingTogglesState (true);
-    clearPatternButton.onClick = [this]
+    patternChoice.attach (proc.apvts, "pattern");
+    swingRow.attach (proc.apvts, "swing");
+    lenRow.attach (proc.apvts, "seqlen");
+
+    if (auto* seqParam = proc.apvts.getParameter ("seqon"))
+    {
+        seqOnAttachment = std::make_unique<juce::ParameterAttachment> (*seqParam, [this] (float v) { seqOnBtn.setOn (v >= 0.5f); });
+        seqOnAttachment->sendInitialUpdate();
+    }
+
+    seqOnBtn.onClick = [this]
+    {
+        if (seqOnAttachment != nullptr)
+            seqOnAttachment->setValueAsCompleteGesture (seqOnBtn.isOn() ? 1.0f : 0.0f);
+    };
+
+    clearPatBtn.onClick = [this]
     {
         proc.clearPattern ((int) std::lround (proc.apvts.getRawParameterValue ("pattern")->load()));
         grid->repaint();
     };
 
-    setupCombo  (patternBox, patternLabel, "Pattern", DrumRackProcessor::patternChoices());
-    setupSlider (swingSlider, swingLabel, "Swing", " %");
-    setupSlider (lenSlider,   lenLabel,   "Pattern length", " steps");
-
-    seqOnA   = std::make_unique<ButtonAttachment> (proc.apvts, "seqon", seqOnButton);
-    patternA = std::make_unique<ComboAttachment>  (proc.apvts, "pattern", patternBox);
-    swingA   = std::make_unique<SliderAttachment> (proc.apvts, "swing", swingSlider);
-    lenA     = std::make_unique<SliderAttachment> (proc.apvts, "seqlen", lenSlider);
-
-    for (juce::Component* c : { (juce::Component*) &seqOnButton, (juce::Component*) &clearPatternButton,
-                                (juce::Component*) &patternBox, (juce::Component*) &swingSlider,
-                                (juce::Component*) &lenSlider, (juce::Component*) &patternLabel,
-                                (juce::Component*) &swingLabel, (juce::Component*) &lenLabel,
-                                (juce::Component*) grid.get() })
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &patternChoice, &seqOnBtn, &clearPatBtn, &swingRow, &lenRow, grid.get() })
+    {
+        addAndMakeVisible (c);
         seqPage.push_back (c);
+    }
 
     selectPad (0);
     showPage (0);
-    setSize (980, 540);
-    startTimerHz (30);
+    setSize (windowW, windowH);
+    startTimerHz (15);   // намеренно «рваный» ретро-темп
 }
 
 DrumRackEditor::~DrumRackEditor()
 {
     stopTimer();
-    resetPadAttachments();
-    seqOnA.reset(); patternA.reset(); swingA.reset(); lenA.reset();
+    seqOnAttachment.reset();
     setLookAndFeel (nullptr);
 }
 
-void DrumRackEditor::resetPadAttachments()
-{
-    volA.reset(); panA.reset(); pitchA.reset(); startA.reset(); endA.reset(); chokeA.reset();
-    loopStartA.reset(); loopEndA.reset(); fadeA.reset();
-    loopA.reset(); rateA.reset(); stepA.reset();
-}
-
-void DrumRackEditor::setupSlider (juce::Slider& s, juce::Label& l, const juce::String& text, const juce::String& suffix)
-{
-    s.setSliderStyle (juce::Slider::LinearHorizontal);
-    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 20);
-    s.setTextValueSuffix (suffix);
-    addAndMakeVisible (s);
-
-    l.setText (text, juce::dontSendNotification);
-    l.setFont (juce::FontOptions (12.0f));
-    l.setColour (juce::Label::textColourId, pal::textDim);
-    addAndMakeVisible (l);
-}
-
-void DrumRackEditor::setupCombo (juce::ComboBox& b, juce::Label& l, const juce::String& text, const juce::StringArray& items)
-{
-    b.addItemList (items, 1);
-    addAndMakeVisible (b);
-
-    l.setText (text, juce::dontSendNotification);
-    l.setFont (juce::FontOptions (12.0f));
-    l.setColour (juce::Label::textColourId, pal::textDim);
-    addAndMakeVisible (l);
-}
-
+//==============================================================================
 void DrumRackEditor::showPage (int newPage)
 {
     page = newPage;
 
-    for (auto* c : padsPage)
-        c->setVisible (page == 0);
+    for (auto* c : padsPage) c->setVisible (page == 0);
+    for (auto* c : seqPage)  c->setVisible (page == 1);
 
-    for (auto* c : seqPage)
-        c->setVisible (page == 1);
-
-    padsTab.setToggleState (page == 0, juce::dontSendNotification);
-    seqTab.setToggleState (page == 1, juce::dontSendNotification);
+    padsTab.setOn (page == 0);
+    seqTab.setOn (page == 1);
     repaint();
 }
 
@@ -431,29 +379,25 @@ void DrumRackEditor::selectPad (int index)
 {
     selected = juce::jlimit (0, DrumRackProcessor::numPads - 1, index);
 
-    // если шёл MIDI Learn для другого пэда, отменяем
     if (proc.learning.load() && proc.learnPad.load() != selected)
     {
         proc.learning.store (false);
-        learnButton.setToggleState (false, juce::dontSendNotification);
+        learnBtn.setOn (false);
     }
 
-    resetPadAttachments();
-
     const auto id = juce::String (selected);
-    volA   = std::make_unique<SliderAttachment> (proc.apvts, "vol"   + id, volSlider);
-    panA   = std::make_unique<SliderAttachment> (proc.apvts, "pan"   + id, panSlider);
-    pitchA = std::make_unique<SliderAttachment> (proc.apvts, "pitch" + id, pitchSlider);
-    startA = std::make_unique<SliderAttachment> (proc.apvts, "start" + id, startSlider);
-    endA   = std::make_unique<SliderAttachment> (proc.apvts, "end"   + id, endSlider);
-    chokeA = std::make_unique<SliderAttachment> (proc.apvts, "choke" + id, chokeSlider);
-
-    loopA      = std::make_unique<ComboAttachment>  (proc.apvts, "loop"      + id, loopBox);
-    loopStartA = std::make_unique<SliderAttachment> (proc.apvts, "loopstart" + id, loopStartSlider);
-    loopEndA   = std::make_unique<SliderAttachment> (proc.apvts, "loopend"   + id, loopEndSlider);
-    rateA      = std::make_unique<ComboAttachment>  (proc.apvts, "rate"      + id, rateBox);
-    stepA      = std::make_unique<ComboAttachment>  (proc.apvts, "step"      + id, stepBox);
-    fadeA      = std::make_unique<SliderAttachment> (proc.apvts, "fade"      + id, fadeSlider);
+    volRow.attach       (proc.apvts, "vol" + id);
+    panRow.attach       (proc.apvts, "pan" + id);
+    pitchRow.attach     (proc.apvts, "pitch" + id);
+    startRow.attach     (proc.apvts, "start" + id);
+    endRow.attach       (proc.apvts, "end" + id);
+    chokeRow.attach     (proc.apvts, "choke" + id);
+    loopChoice.attach   (proc.apvts, "loop" + id);
+    loopStartRow.attach (proc.apvts, "loopstart" + id);
+    loopEndRow.attach   (proc.apvts, "loopend" + id);
+    rateChoice.attach   (proc.apvts, "rate" + id);
+    stepChoice.attach   (proc.apvts, "step" + id);
+    fadeRow.attach      (proc.apvts, "fade" + id);
 
     for (int i = 0; i < DrumRackProcessor::numPads; ++i)
         pads[i]->isSelected = (i == selected);
@@ -463,8 +407,7 @@ void DrumRackEditor::selectPad (int index)
 
 void DrumRackEditor::browseForSample()
 {
-    chooser = std::make_unique<juce::FileChooser> ("Choose a sample", juce::File(),
-                                                   "*.wav;*.aif;*.aiff;*.flac;*.ogg");
+    chooser = std::make_unique<juce::FileChooser> ("Choose a sample", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.ogg");
 
     juce::Component::SafePointer<DrumRackEditor> safeThis (this);
     const int pad = selected;
@@ -481,153 +424,362 @@ void DrumRackEditor::browseForSample()
                           });
 }
 
+//==============================================================================
+// анимация (15 Гц)
 void DrumRackEditor::timerCallback()
 {
+    advanceFrame();
+    repaint();
+}
+
+void DrumRackEditor::advanceFrame()
+{
+    ++frame;
+
+    // облака
+    static const float speeds[3] = { 0.35f, 0.6f, 0.25f };
+    for (int i = 0; i < 3; ++i)
+    {
+        cloudX[i] += speeds[i] * 2.0f;
+        if (cloudX[i] > (float) windowW)
+            cloudX[i] = -50.0f;
+    }
+
+    // подсветка пэдов
     for (int i = 0; i < DrumRackProcessor::numPads; ++i)
     {
         const int hits = proc.hitCounter[i].load();
-
         if (hits != lastHit[i])
         {
             lastHit[i] = hits;
             pads[i]->flash = 1.0f;
-            pads[i]->repaint();
         }
-        else if (pads[i]->flash > 0.01f)
+        else
         {
-            pads[i]->flash *= 0.82f;
-            pads[i]->repaint();
-        }
-        else if (pads[i]->flash > 0.0f)
-        {
-            pads[i]->flash = 0.0f;
-            pads[i]->repaint();
+            pads[i]->flash = pads[i]->flash > 0.08f ? pads[i]->flash * 0.55f : 0.0f;
         }
     }
 
     // подсветка текущего шага
-    const int step = proc.currentStep.load();
-    if (page == 1)
-    {
-        grid->playStep = step;
-        grid->repaint();
-    }
+    grid->playStep = proc.currentStep.load();
 
-    // MIDI Learn: когда нота получена, процессор сам выключает learning
+    // MIDI Learn
     const bool learning = proc.learning.load();
-    if (learnButton.getToggleState() != learning)
+    if (learnBtn.isOn() != learning)
+        learnBtn.setOn (learning);
+
+    // эквалайзер
+    const float level = juce::jlimit (0.0f, 1.0f, proc.outputLevel.load());
+    for (int i = 0; i < 48; ++i)
     {
-        learnButton.setToggleState (learning, juce::dontSendNotification);
-        pads[selected]->repaint();
+        const float shape = 0.55f + 0.45f * std::sin ((float) frame * 0.7f + (float) i * 0.55f);
+        const float target = juce::jlimit (0.0f, 1.0f, level * 1.7f * (0.35f * shape + 0.65f * rng.nextFloat()));
+        eqHeights[i] = target > eqHeights[i] ? target : juce::jmax (target, eqHeights[i] - 0.14f);
     }
 
-    const int note = proc.padNote[selected].load();
-    auto name = proc.getSampleName (selected);
-
-    padTitle.setText ("Pad " + juce::String (selected + 1) + (name.isEmpty() ? "" : "  -  " + name),
-                      juce::dontSendNotification);
-
-    noteInfo.setText (learning ? "Hit a pad on your MIDI controller..."
-                               : "MIDI note " + juce::String (note) + "  ("
-                                   + juce::MidiMessage::getMidiNoteName (note, true, true, 5) + ")",
-                      juce::dontSendNotification);
+    // редкие «сбои»: примерно раз в 4 секунды на 2-4 кадра
+    if (glitchFrames > 0)
+    {
+        --glitchFrames;
+        glitchY = rng.nextInt (windowH - 60);
+        glitchH = 10 + rng.nextInt (24);
+    }
+    else if (--framesToGlitch <= 0)
+    {
+        glitchFrames = 2 + rng.nextInt (3);
+        framesToGlitch = 45 + rng.nextInt (30);
+        glitchY = rng.nextInt (windowH - 60);
+        glitchH = 10 + rng.nextInt (24);
+    }
 }
 
-void DrumRackEditor::paint (juce::Graphics& g)
+void DrumRackEditor::prepareSnapshot (int pageIndex, int frames, int glitch)
 {
-    g.fillAll (pal::bg);
+    showPage (pageIndex);
+
+    for (int i = 0; i < frames; ++i)
+        advanceFrame();
+
+    glitchFrames = glitch;
+    glitchY = 170;
+    glitchH = 22;
+}
+
+//==============================================================================
+void DrumRackEditor::rebuildBackground()
+{
+    background = juce::Image (juce::Image::RGB, windowW, windowH, false);
+    juce::Graphics g (background);
+
+    // горизонтальные полосы по 6 px, градиент квантован в 14 ступеней
+    for (int y = 0; y < windowH; y += 6)
+    {
+        const float t = juce::jlimit (0.0f, 1.0f, (float) (y + 3) / (float) windowH);
+        const float q = juce::jmin (1.0f, std::floor (t * 14.0f) / 13.0f);
+
+        const auto c = q < 0.5f ? pal::bgTop.interpolatedWith (pal::bgMid, q * 2.0f)
+                                : pal::bgMid.interpolatedWith (pal::bgBot, (q - 0.5f) * 2.0f);
+        g.setColour (c);
+        g.fillRect (0, y, windowW, 6);
+    }
+}
+
+void DrumRackEditor::rebuildScanlines()
+{
+    scanlines = juce::Image (juce::Image::ARGB, windowW, windowH, true);
+    juce::Graphics g (scanlines);
+    g.setColour (pal::ink.withAlpha (0.09f));
+
+    for (int y = 0; y < windowH; y += 3)    // каждая 3-я строка пикселей
+        g.fillRect (0, y, windowW, 1);
 }
 
 void DrumRackEditor::resized()
 {
-    auto area = getLocalBounds().reduced (16);
+    rebuildBackground();
+    rebuildScanlines();
 
-    // вкладки
-    auto tabRow = area.removeFromTop (30);
-    padsTab.setBounds (tabRow.removeFromLeft (110));
-    tabRow.removeFromLeft (6);
-    seqTab.setBounds (tabRow.removeFromLeft (130));
-    brand.setBounds (tabRow);
-    area.removeFromTop (12);
+    // вкладки в шапке
+    padsTab.setBounds (24, 74, 100, 33);
+    seqTab.setBounds (130, 74, 140, 33);
 
-    // ---------------- страница PADS ----------------
+    const int top = 118, colW = 370, left = 20, right = 410;
+
+    // --- PADS ---
+    padsPanel   = { left, top, colW, 480 };
+    samplePanel = { right, top, colW, 235 };
+    loopPanel   = { right, top + 245, colW, 235 };
+
+    const int gx = padsPanel.getX() + 12, gy = padsPanel.getY() + 46;
+    for (int i = 0; i < DrumRackProcessor::numPads; ++i)
     {
-        auto pa = area;
-
-        // сетка 4x4: пэд 1 внизу слева, как на MPK Mini
-        auto padArea = pa.removeFromLeft (420);
-        const int cellW = padArea.getWidth() / 4;
-        const int cellH = padArea.getHeight() / 4;
-
-        for (int i = 0; i < DrumRackProcessor::numPads; ++i)
-        {
-            const int col = i % 4;
-            const int row = 3 - (i / 4);
-            pads[i]->setBounds (padArea.getX() + col * cellW, padArea.getY() + row * cellH, cellW, cellH);
-        }
-
-        pa.removeFromLeft (16);
-
-        padTitle.setBounds (pa.removeFromTop (30));
-        noteInfo.setBounds (pa.removeFromTop (24));
-        pa.removeFromTop (8);
-
-        auto buttons = pa.removeFromTop (30);
-        loadButton.setBounds  (buttons.removeFromLeft (130));
-        buttons.removeFromLeft (8);
-        clearButton.setBounds (buttons.removeFromLeft (70));
-        buttons.removeFromLeft (8);
-        learnButton.setBounds (buttons.removeFromLeft (110));
-
-        pa.removeFromTop (14);
-
-        auto colA = pa.removeFromLeft ((pa.getWidth() - 16) / 2);
-        pa.removeFromLeft (16);
-        auto colB = pa;
-
-        auto place = [] (juce::Rectangle<int>& col, juce::Label& l, juce::Component& c)
-        {
-            auto row = col.removeFromTop (50);
-            l.setBounds (row.removeFromTop (16));
-            c.setBounds (row.removeFromTop (26));
-        };
-
-        place (colA, volLabel,   volSlider);
-        place (colA, panLabel,   panSlider);
-        place (colA, pitchLabel, pitchSlider);
-        place (colA, startLabel, startSlider);
-        place (colA, endLabel,   endSlider);
-        place (colA, chokeLabel, chokeSlider);
-
-        place (colB, loopLabel,      loopBox);
-        place (colB, loopStartLabel, loopStartSlider);
-        place (colB, loopEndLabel,   loopEndSlider);
-        place (colB, rateLabel,      rateBox);
-        place (colB, stepLabel,      stepBox);
-        place (colB, fadeLabel,      fadeSlider);
+        const int col = i % 4;
+        const int row = 3 - (i / 4);   // пэд 1 внизу слева, как на MPK Mini
+        pads[i]->setBounds (gx + col * 86, gy + row * 80, 86, 80);
     }
 
-    // ---------------- страница SEQUENCER ----------------
+    const int by = padsPanel.getY() + 428;
+    loadBtn.setBounds  (gx, by, 108, 33);
+    clearBtn.setBounds (gx + 116, by, 108, 33);
+    learnBtn.setBounds (gx + 232, by, 108, 33);
+
+    auto placeRows = [] (juce::Rectangle<int> panel, std::initializer_list<juce::Component*> rows)
     {
-        auto sa = area;
-        auto head = sa.removeFromTop (46);
-
-        auto labelled = [] (juce::Rectangle<int> r, juce::Label& l, juce::Component& c)
+        int y = panel.getY() + 44;
+        for (auto* c : rows)
         {
-            l.setBounds (r.removeFromTop (16));
-            c.setBounds (r.removeFromTop (26));
-        };
+            c->setBounds (panel.getX() + 12, y, panel.getWidth() - 24, 30);
+            y += 30;
+        }
+    };
 
-        seqOnButton.setBounds (head.removeFromLeft (100).withTrimmedTop (20));
-        head.removeFromLeft (16);
-        labelled (head.removeFromLeft (110), patternLabel, patternBox);
-        head.removeFromLeft (16);
-        labelled (head.removeFromLeft (240), swingLabel, swingSlider);
-        head.removeFromLeft (16);
-        labelled (head.removeFromLeft (240), lenLabel, lenSlider);
-        clearPatternButton.setBounds (head.removeFromRight (120).withTrimmedTop (20));
+    placeRows (samplePanel, { &volRow, &panRow, &pitchRow, &startRow, &endRow, &chokeRow });
+    placeRows (loopPanel,   { &loopChoice, &loopStartRow, &loopEndRow, &rateChoice, &stepChoice, &fadeRow });
 
-        sa.removeFromTop (8);
-        grid->setBounds (sa);
+    // --- SEQUENCER ---
+    seqCtrlPanel = { left, top, 760, 120 };
+    seqGridPanel = { left, top + 130, 760, 350 };
+
+    const int cy = seqCtrlPanel.getY() + 44;
+    patternChoice.setBounds (left + 12, cy, 352, 30);
+    seqOnBtn.setBounds (left + 12, cy + 36, 120, 33);
+    clearPatBtn.setBounds (left + 140, cy + 36, 120, 33);
+    swingRow.setBounds (left + 12 + 352 + 16, cy, 344, 30);
+    lenRow.setBounds (left + 12 + 352 + 16, cy + 32, 344, 30);
+
+    grid->setBounds (seqGridPanel.getX() + 12, seqGridPanel.getY() + 42, 736, 296);
+}
+
+//==============================================================================
+void DrumRackEditor::paintPanel (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& title, juce::Colour c)
+{
+    pixelBox (g, r, c);
+
+    // шапка панели: полоса цвета панели (прозрачность 0.45), сердечко и название
+    g.saveState();
+    g.reduceClipRegion (steppedRect (r.reduced (3), 3, 2));
+    g.setColour (c.withAlpha (0.45f));
+    g.fillRect (r.getX() + 3, r.getY() + 3, r.getWidth() - 6, 33);
+    g.restoreState();
+
+    drawSprite (g, sprites::miniHeart, sprites::miniHeartRows, r.getX() + 15, r.getY() + 15, 2,
+                [] (char) { return pal::ink; });
+
+    g.setColour (pal::ink);
+    g.setFont (pixelfont::title (13.0f));
+    g.drawText (title, r.getX() + 36, r.getY() + 3, r.getWidth() - 50, 33, juce::Justification::centredLeft, false);
+}
+
+void DrumRackEditor::paintHeader (juce::Graphics& g)
+{
+    // облака плывут по шапке
+    const int cloudY[3] = { 10, 52, 22 };
+    for (int i = 0; i < 3; ++i)
+        drawSprite (g, sprites::cloud, sprites::cloudRows, (int) cloudX[i], cloudY[i], 3,
+                    [] (char) { return juce::Colours::white.withAlpha (0.65f); });
+
+    // блёстки мерцают
+    const int sx[5] = { 330, 548, 430, 300, 770 };
+    const int sy[5] = { 14, 56, 84, 70, 12 };
+    for (int i = 0; i < 5; ++i)
+    {
+        const int phase = (frame + i * 3) % 8;
+        if (phase < 6)
+            drawSprite (g, phase < 3 ? sprites::sparkleA : sprites::sparkleB, sprites::sparkleRows, sx[i], sy[i], 3,
+                        [i] (char) { return i % 2 == 0 ? pal::lemon : juce::Colours::white; });
+    }
+
+    // сердечки
+    const int hx[3] = { 345, 505, 560 };
+    const int hy[3] = { 46, 20, 90 };
+    for (int i = 0; i < 3; ++i)
+        drawSprite (g, sprites::heart, sprites::heartRows, hx[i], hy[i] + (((frame + i) / 2) % 2) * 2, 2,
+                    [] (char) { return pal::pink; });
+
+    // чиби-певицы: открывают рты и подпрыгивают, когда есть звук
+    const bool singing = proc.outputLevel.load() > 0.02f;
+    const juce::Colour hair[4]  = { pal::pink, pal::lavender, pal::mint, pal::sky };
+    const juce::Colour dress[4] = { pal::sky, pal::lemon, pal::peach, pal::pink };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const bool open = singing && ((frame + i) % 2 == 0);
+        const int bounce = (singing && ((frame / 1 + i) % 2 == 0)) ? 4 : 0;
+        const auto hc = hair[i].darker (0.12f);
+        const auto dc = dress[i];
+
+        drawSprite (g, open ? sprites::chibiOpen : sprites::chibiClosed, sprites::chibiRows,
+                    582 + i * 52, 66 - bounce, 3,
+                    [hc, dc] (char ch)
+                    {
+                        switch (ch)
+                        {
+                            case 'H': return hc;
+                            case 'S': return juce::Colour (0xffFFE6D8);
+                            case 'E': return pal::ink;
+                            case 'B': return pal::pink;
+                            case 'm': return pal::glitchPink;
+                            case 'M': return pal::ink;
+                            case 'D': return dc;
+                            default:  return juce::Colours::white;
+                        }
+                    });
+    }
+
+    // заголовок с хроматической аберрацией (при сбое сдвиг ±4 px)
+    const int shift = glitchFrames > 0 ? 4 : 2;
+    const juce::Rectangle<int> t (24, 20, 400, 40);
+    g.setFont (pixelfont::title (30.0f));
+
+    g.setColour (pal::glitchCyan);
+    g.drawText ("DRUMRACK16", t.translated (-shift, 0), juce::Justification::topLeft, false);
+    g.setColour (pal::glitchPink);
+    g.drawText ("DRUMRACK16", t.translated (shift, 0), juce::Justification::topLeft, false);
+    g.setColour (pal::ink);
+    g.drawText ("DRUMRACK16", t, juce::Justification::topLeft, false);
+}
+
+void DrumRackEditor::paintPadInfo (juce::Graphics& g)
+{
+    const auto name = proc.getSampleName (selected);
+    const int note = proc.padNote[selected].load();
+    const int x = padsPanel.getX() + 14;
+    const int y = padsPanel.getY() + 46 + 320 + 4;
+
+    g.setColour (pal::ink);
+    g.setFont (pixelfont::vhs (26.0f));
+    g.drawText ("Pad " + juce::String (selected + 1).paddedLeft ('0', 2) + "  " + (name.isEmpty() ? juce::String ("- empty -") : name),
+                x, y, padsPanel.getWidth() - 28, 28, juce::Justification::centredLeft, true);
+
+    g.setColour (pal::inkSoft);
+    g.setFont (pixelfont::vhs (24.0f));
+    g.drawText (proc.learning.load() ? juce::String ("hit a pad on your controller...")
+                                     : "MIDI note " + juce::String (note) + "  (" + juce::MidiMessage::getMidiNoteName (note, true, true, 5) + ")",
+                x, y + 26, padsPanel.getWidth() - 28, 26, juce::Justification::centredLeft, true);
+}
+
+void DrumRackEditor::paintEqualizer (juce::Graphics& g)
+{
+    const int x0 = 22, y0 = 612, segs = 8, segH = 4, segGap = 1, barW = 10, barPitch = 13;
+
+    for (int i = 0; i < 48; ++i)
+    {
+        const int lit = (int) std::lround (eqHeights[i] * (float) segs);
+
+        for (int s = 0; s < segs; ++s)
+        {
+            const int y = y0 + (segs - 1 - s) * (segH + segGap);
+            if (s < lit)
+                g.setColour (PixelLookAndFeel::segmentColour ((float) s / (float) (segs - 1)));
+            else
+                g.setColour (juce::Colours::white.withAlpha (0.35f));
+
+            g.fillRect (x0 + i * barPitch, y, barW, segH);
+        }
+    }
+
+    // подпись внизу справа, с тенью
+    g.setFont (pixelfont::title (10.0f));
+    const juce::Rectangle<int> sig (windowW - 20 - 120, windowH - 26, 120, 14);
+    g.setColour (pal::ink.withAlpha (0.18f));
+    g.drawText (juce::CharPointer_UTF8 ("\xD0\x9F\xD0\x95\xD0\x9F\xD0\x95L"), sig.translated (1, 1), juce::Justification::centredRight, false);
+    g.setColour (pal::inkSoft);
+    g.drawText (juce::CharPointer_UTF8 ("\xD0\x9F\xD0\x95\xD0\x9F\xD0\x95L"), sig, juce::Justification::centredRight, false);
+}
+
+void DrumRackEditor::paint (juce::Graphics& g)
+{
+    g.drawImageAt (background, 0, 0);
+
+    paintHeader (g);
+
+    if (page == 0)
+    {
+        paintPanel (g, padsPanel, "PADS", pal::pink);
+        paintPanel (g, samplePanel, "SAMPLE", pal::mint);
+        paintPanel (g, loopPanel, "LOOP / RATCHET", pal::lavender);
+        paintPadInfo (g);
+    }
+    else
+    {
+        paintPanel (g, seqCtrlPanel, "SEQUENCER", pal::sky);
+        paintPanel (g, seqGridPanel, "STEPS", pal::lavender);
+    }
+
+    paintEqualizer (g);
+}
+
+void DrumRackEditor::paintOverChildren (juce::Graphics& g)
+{
+    // сканлайны (кэшированный Image)
+    g.drawImageAt (scanlines, 0, 0);
+
+    // плёночное зерно: ~24 случайные точки 2x1 за кадр
+    juce::Random grain (frame * 7919 + 13);
+    for (int i = 0; i < 24; ++i)
+    {
+        g.setColour (grain.nextBool() ? juce::Colours::white.withAlpha (0.45f) : pal::ink.withAlpha (0.22f));
+        g.fillRect (grain.nextInt (windowW), grain.nextInt (windowH), 2, 1);
+    }
+
+    // редкие сбои: полупрозрачная белая полоса с цветными разрывами
+    if (glitchFrames > 0)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.24f));
+        g.fillRect (0, glitchY, windowW, glitchH);
+
+        juce::Random tear (frame * 104729 + glitchY);
+        for (int k = 0; k < 4; ++k)
+        {
+            const int w = 40 + tear.nextInt (170);
+            const int x = tear.nextInt (windowW - w);
+            const int y = glitchY + tear.nextInt (juce::jmax (1, glitchH - 4));
+            const int h = 2 + tear.nextInt (4);
+
+            g.setColour (pal::glitchCyan.withAlpha (0.5f));
+            g.fillRect (x - 4, y, w, h);
+            g.setColour (pal::glitchPink.withAlpha (0.5f));
+            g.fillRect (x + 4, y, w, h);
+        }
     }
 }

@@ -62,7 +62,8 @@ public:
     void setStep (int pattern, int pad, int step, bool on);
     void clearPattern (int pattern);
     std::atomic<int> stepMask[numPatterns][numPads];
-    std::atomic<int> currentStep { -1 };   // для подсветки, -1 когда транспорт стоит
+    std::atomic<int> currentStep { -1 };
+    std::atomic<float> outputLevel { 0.0f };   // для анимации интерфейса (певицы, эквалайзер)   // для подсветки, -1 когда транспорт стоит
 
     juce::AudioProcessorValueTreeState apvts;
 

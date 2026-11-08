@@ -11,66 +11,81 @@ public:
     ~DrumRackEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
+    // для инструмента снимков интерфейса (без цикла событий)
+    void prepareSnapshot (int pageIndex, int frame, int glitchFrames);
+
+    static constexpr int windowW = 800;
+    static constexpr int windowH = 660;
+
 private:
-    class PadComponent;
+    class PadButton;
     class StepGrid;
-    friend class PadComponent;
+    friend class PadButton;
     friend class StepGrid;
 
-    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
-
+    void timerCallback() override;
+    void advanceFrame();
     void selectPad (int index);
     void browseForSample();
-    void showPage (int page);
-    void timerCallback() override;
-    void setupSlider (juce::Slider& s, juce::Label& l, const juce::String& text, const juce::String& suffix);
-    void setupCombo (juce::ComboBox& b, juce::Label& l, const juce::String& text, const juce::StringArray& items);
-    void resetPadAttachments();
+    void showPage (int newPage);
+    void rebuildBackground();
+    void rebuildScanlines();
 
-    PastelLookAndFeel laf;   // объявлен первым, чтобы пережить все компоненты
+    void paintHeader (juce::Graphics&);
+    void paintPanel (juce::Graphics&, juce::Rectangle<int> r, const juce::String& title, juce::Colour c);
+    void paintPadInfo (juce::Graphics&);
+    void paintEqualizer (juce::Graphics&);
+
+    PixelLookAndFeel laf;   // объявлен первым: переживает все компоненты
 
     DrumRackProcessor& proc;
     int selected = 0;
     int page = 0;
+    int frame = 0;
 
-    juce::TextButton padsTab { "PADS" }, seqTab { "SEQUENCER" };
-    juce::Label brand;
+    // вкладки
+    PixelButton padsTab { "PADS", pal::pink };
+    PixelButton seqTab  { "SEQUENCER", pal::lavender };
 
-    // --- страница PADS ---
-    std::unique_ptr<PadComponent> pads[DrumRackProcessor::numPads];
+    // страница PADS
+    std::unique_ptr<PadButton> pads[DrumRackProcessor::numPads];
     int lastHit[DrumRackProcessor::numPads] {};
 
-    juce::Label padTitle, noteInfo;
-    juce::TextButton loadButton { "Load sample..." }, clearButton { "Clear" }, learnButton { "MIDI Learn" };
+    PixelButton loadBtn  { "LOAD", pal::mint };
+    PixelButton clearBtn { "CLEAR", pal::peach };
+    PixelButton learnBtn { "LEARN", pal::sky, true };
 
-    juce::Slider volSlider, panSlider, pitchSlider, startSlider, endSlider, chokeSlider;
-    juce::Label  volLabel, panLabel, pitchLabel, startLabel, endLabel, chokeLabel;
+    ParamRow volRow, panRow, pitchRow, startRow, endRow, chokeRow;
+    ChoiceRow loopChoice, rateChoice, stepChoice;
+    ParamRow loopStartRow, loopEndRow, fadeRow;
 
-    juce::ComboBox loopBox, rateBox, stepBox;
-    juce::Slider   loopStartSlider, loopEndSlider, fadeSlider;
-    juce::Label    loopLabel, loopStartLabel, loopEndLabel, rateLabel, stepLabel, fadeLabel;
-
-    std::unique_ptr<SliderAttachment> volA, panA, pitchA, startA, endA, chokeA,
-                                      loopStartA, loopEndA, fadeA;
-    std::unique_ptr<ComboAttachment>  loopA, rateA, stepA;
-
-    // --- страница SEQUENCER ---
-    juce::TextButton seqOnButton { "SEQ ON" }, clearPatternButton { "Clear pattern" };
-    juce::ComboBox patternBox;
-    juce::Slider swingSlider, lenSlider;
-    juce::Label patternLabel, swingLabel, lenLabel;
+    // страница SEQUENCER
+    ChoiceRow patternChoice;
+    PixelButton seqOnBtn { "SEQ ON", pal::mint, true };
+    PixelButton clearPatBtn { "CLEAR", pal::peach };
+    ParamRow swingRow, lenRow;
     std::unique_ptr<StepGrid> grid;
-
-    std::unique_ptr<ButtonAttachment> seqOnA;
-    std::unique_ptr<ComboAttachment>  patternA;
-    std::unique_ptr<SliderAttachment> swingA, lenA;
+    std::unique_ptr<juce::ParameterAttachment> seqOnAttachment;
 
     std::vector<juce::Component*> padsPage, seqPage;
     std::unique_ptr<juce::FileChooser> chooser;
+
+    // области панелей (считаются в resized)
+    juce::Rectangle<int> padsPanel, samplePanel, loopPanel, seqCtrlPanel, seqGridPanel;
+
+    // кэш картинок
+    juce::Image background, scanlines;
+
+    // анимация
+    juce::Random rng;
+    float cloudX[3] { 40.0f, 330.0f, 560.0f };
+    float eqHeights[48] {};
+    int glitchFrames = 0;
+    int framesToGlitch = 55;
+    int glitchY = 40, glitchH = 18;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrumRackEditor)
 };

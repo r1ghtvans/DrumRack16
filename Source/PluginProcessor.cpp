@@ -643,6 +643,13 @@ void DrumRackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         pos = next;
     }
 
+    // уровень на выходе для анимации интерфейса
+    float peak = 0.0f;
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, numSamples));
+
+    outputLevel.store (juce::jmax (peak, outputLevel.load() * 0.9f));
+
     sampleCounter += numSamples;
     midi.clear();
 }
