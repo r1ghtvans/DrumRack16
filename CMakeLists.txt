@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Статическая C++ библиотека на Windows: плагину не нужен Visual C++ Redistributable
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(DrumRack16 VERSION 0.1.0)
+project(DrumRack16 VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(DRUMRACK_BUILD_TOOLS "Build DSP test and UI snapshot tools" OFF)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -15,6 +16,10 @@ FetchContent_Declare(
     GIT_TAG        8.0.4
     GIT_SHALLOW    ON)
 FetchContent_MakeAvailable(JUCE)
+
+juce_add_binary_data(DrumRackAssets SOURCES
+    Assets/VT323-Regular.ttf
+    Assets/PressStart2P-Regular.ttf)
 
 juce_add_plugin(DrumRack16
     COMPANY_NAME "MyStudio"
@@ -42,6 +47,7 @@ juce_generate_juce_header(DrumRack16)
 
 target_link_libraries(DrumRack16
     PRIVATE
+        DrumRackAssets
         juce::juce_audio_utils
         juce::juce_audio_formats
     PUBLIC
