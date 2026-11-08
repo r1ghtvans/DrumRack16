@@ -71,6 +71,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumRackProcessor::createLay
             NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.0f));
     }
 
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "seqon", 1 }, "Sequencer On", true));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "swing", 1 }, "Swing",
+        NormalisableRange<float> (50.0f, 75.0f, 1.0f), 50.0f,
+        AudioParameterFloatAttributes().withLabel ("%")));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "pattern", 1 }, "Pattern", patternChoices(), 0));
+
+    layout.add (std::make_unique<AudioParameterInt> (
+        ParameterID { "seqlen", 1 }, "Pattern Length", 1, 16, 16));
+
     return layout;
 }
 
@@ -79,6 +92,15 @@ DrumRackProcessor::DrumRackProcessor()
       apvts (*this, nullptr, "STATE", createLayout())
 {
     formatManager.registerBasicFormats();
+
+    for (int pat = 0; pat < numPatterns; ++pat)
+        for (int i = 0; i < numPads; ++i)
+            stepMask[pat][i].store (0);
+
+    seqOnP   = apvts.getRawParameterValue ("seqon");
+    swingP   = apvts.getRawParameterValue ("swing");
+    patternP = apvts.getRawParameterValue ("pattern");
+    seqLenP  = apvts.getRawParameterValue ("seqlen");
 
     for (int i = 0; i < numPads; ++i)
     {
@@ -116,6 +138,11 @@ void DrumRackProcessor::prepareToPlay (double sampleRate, int)
     for (auto& h : hitCount)
         h = 0;
 
+    for (auto& s : seqHeld)
+        s = false;
+
+    wasPlaying = false;
+    currentStep.store (-1);
     sampleCounter = 0;
     currentAbs = 0;
 }
@@ -163,7 +190,7 @@ void DrumRackProcessor::releaseLoop (int p)
         voices[p].choking = true;
 }
 
-void DrumRackProcessor::addPending (int p, float velocity, juce::int64 due)
+void DrumRackProcessor::addPending (int p, float velocity, juce::int64 due, int kind)
 {
     for (auto& e : pending)
     {
@@ -173,6 +200,7 @@ void DrumRackProcessor::addPending (int p, float velocity, juce::int64 due)
             e.pad = p;
             e.velocity = velocity;
             e.due = due;
+            e.kind = kind;
             return;
         }
     }
@@ -183,12 +211,110 @@ void DrumRackProcessor::firePending (juce::int64 now)
 {
     for (auto& e : pending)
     {
-        if (e.active && e.due <= now)
+        if (! e.active || e.due > now)
+            continue;
+
+        e.active = false;
+        const int p = e.pad;
+
+        if (e.kind == 0)
         {
-            e.active = false;
-            startVoice (e.pad, e.velocity);
+            startVoice (p, e.velocity);
+        }
+        else if (e.kind == 1)
+        {
+            const bool loop = loopP[p]->load() >= 0.5f;
+
+            // для Loop: если соседние шаги подряд включены, петля просто продолжает играть
+            if (loop && seqHeld[p] && voices[p].active)
+                continue;
+
+            triggerHit (p, e.velocity);
+            seqHeld[p] = loop;
+        }
+        else if (seqHeld[p])
+        {
+            releaseLoop (p);
+            seqHeld[p] = false;
         }
     }
+}
+
+void DrumRackProcessor::releaseSeqHeld()
+{
+    for (int p = 0; p < numPads; ++p)
+        if (seqHeld[p])
+        {
+            releaseLoop (p);
+            seqHeld[p] = false;
+        }
+}
+
+// Ставит в очередь все шаги, которые попадают в текущий блок.
+// Позиция берётся из транспорта хоста (в долях четверти), свинг сдвигает каждый второй шаг.
+void DrumRackProcessor::scheduleSteps (double ppqStart, int numSamples, double ppqPerSample, juce::int64 blockStart)
+{
+    const int pattern = juce::jlimit (0, numPatterns - 1, (int) std::lround (patternP->load()));
+    const int len = juce::jlimit (1, 16, (int) std::lround (seqLenP->load()));
+    const double swing = juce::jlimit (0.5, 0.75, (double) swingP->load() / 100.0);
+    const double shift = (swing - 0.5) * 2.0;     // 0..0.5 длины шага
+    const double stepLen = 0.25;                  // 1/16 = четверть четверти
+    const double ppqEnd = ppqStart + (double) numSamples * ppqPerSample;
+
+    const auto g0 = (juce::int64) std::floor (ppqStart / stepLen) - 1;
+    const auto g1 = (juce::int64) std::floor (ppqEnd / stepLen) + 1;
+
+    for (juce::int64 g = juce::jmax<juce::int64> (0, g0); g <= g1; ++g)
+    {
+        const double t = (double) g * stepLen + ((g & 1) != 0 ? shift * stepLen : 0.0);
+
+        if (t < ppqStart || t >= ppqEnd)
+            continue;
+
+        const int step = (int) (g % len);
+        const auto offset = (juce::int64) std::floor ((t - ppqStart) / ppqPerSample);
+        const juce::int64 due = blockStart + juce::jlimit<juce::int64> (0, numSamples - 1, offset);
+
+        for (int p = 0; p < numPads; ++p)
+        {
+            const bool on = ((stepMask[pattern][p].load() >> step) & 1) != 0;
+
+            if (on)
+                addPending (p, 0.85f, due, 1);
+            else if (loopP[p]->load() >= 0.5f)
+                addPending (p, 0.0f, due, 2);
+        }
+    }
+}
+
+bool DrumRackProcessor::getStep (int pattern, int pad, int step) const
+{
+    if (! juce::isPositiveAndBelow (pattern, numPatterns) || ! juce::isPositiveAndBelow (pad, numPads)
+        || ! juce::isPositiveAndBelow (step, 16))
+        return false;
+
+    return ((stepMask[pattern][pad].load() >> step) & 1) != 0;
+}
+
+void DrumRackProcessor::setStep (int pattern, int pad, int step, bool on)
+{
+    if (! juce::isPositiveAndBelow (pattern, numPatterns) || ! juce::isPositiveAndBelow (pad, numPads)
+        || ! juce::isPositiveAndBelow (step, 16))
+        return;
+
+    if (on)
+        stepMask[pattern][pad].fetch_or (1 << step);
+    else
+        stepMask[pattern][pad].fetch_and (~(1 << step));
+}
+
+void DrumRackProcessor::clearPattern (int pattern)
+{
+    if (! juce::isPositiveAndBelow (pattern, numPatterns))
+        return;
+
+    for (int p = 0; p < numPads; ++p)
+        stepMask[pattern][p].store (0);
 }
 
 juce::int64 DrumRackProcessor::nextPendingDue() const
@@ -424,15 +550,51 @@ void DrumRackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         buffer.clear (ch, 0, numSamples);
 
-    // темп проекта (нужен для Ratchet Step)
+    // темп и позиция транспорта хоста
+    bool playing = false;
+    bool havePpq = false;
+    double ppq = 0.0;
+
     if (auto* ph = getPlayHead())
+    {
         if (auto info = ph->getPosition())
+        {
             if (auto b = info->getBpm())
                 if (*b > 20.0)
                     bpm = *b;
 
+            playing = info->getIsPlaying();
+
+            if (auto q = info->getPpqPosition())
+            {
+                ppq = *q;
+                havePpq = true;
+            }
+        }
+    }
+
     const juce::int64 blockStart = sampleCounter;
     currentAbs = blockStart;
+
+    // секвенсор работает только пока играет транспорт хоста
+    if (playing && havePpq && seqOnP->load() >= 0.5f)
+    {
+        const double ppqPerSample = bpm / 60.0 / currentSampleRate;
+        scheduleSteps (ppq, numSamples, ppqPerSample, blockStart);
+
+        const int len = juce::jlimit (1, 16, (int) std::lround (seqLenP->load()));
+        const auto g = (juce::int64) std::floor (juce::jmax (0.0, ppq) / 0.25);
+        currentStep.store ((int) (g % len));
+    }
+    else
+    {
+        currentStep.store (-1);
+    }
+
+    if (wasPlaying && ! playing)
+        releaseSeqHeld();
+
+    wasPlaying = playing;
 
     // нажатия и отпускания мышью из интерфейса
     for (int p = 0; p < numPads; ++p)
@@ -549,6 +711,10 @@ void DrumRackProcessor::getStateInformation (juce::MemoryBlock& destData)
         {
             state.setProperty ("path" + juce::String (i), samplePaths[i], nullptr);
             state.setProperty ("note" + juce::String (i), padNote[i].load(), nullptr);
+
+            for (int pat = 0; pat < numPatterns; ++pat)
+                state.setProperty ("steps" + juce::String (pat) + "_" + juce::String (i),
+                                   stepMask[pat][i].load(), nullptr);
         }
     }
 
@@ -569,6 +735,9 @@ void DrumRackProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (int i = 0; i < numPads; ++i)
     {
         padNote[i].store ((int) tree.getProperty ("note" + juce::String (i), firstNote + i));
+
+        for (int pat = 0; pat < numPatterns; ++pat)
+            stepMask[pat][i].store ((int) tree.getProperty ("steps" + juce::String (pat) + "_" + juce::String (i), 0));
 
         const juce::String path = tree.getProperty ("path" + juce::String (i)).toString();
         const juce::File file (path);

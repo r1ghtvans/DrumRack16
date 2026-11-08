@@ -14,6 +14,7 @@ class DrumRackProcessor : public juce::AudioProcessor
 {
 public:
     static constexpr int numPads = 16;
+    static constexpr int numPatterns = 4;
     static constexpr int firstNote = 36;   // пэд 1 = нота 36 (в FL называется C3), пэд 16 = нота 51
 
     DrumRackProcessor();
@@ -54,6 +55,14 @@ public:
     static juce::StringArray loopChoices() { return { "Off", "Loop" }; }
     static juce::StringArray rateChoices() { return { "/4 (every 4th hit)", "/2 (every 2nd hit)", "x1 (normal)", "x2 (double)", "x4 (quadruple)" }; }
     static juce::StringArray stepChoices() { return { "1/4", "1/8", "1/16", "1/32" }; }
+    static juce::StringArray patternChoices() { return { "A", "B", "C", "D" }; }
+
+    // --- секвенсор: 16 шагов, по биту на шаг ---
+    bool getStep (int pattern, int pad, int step) const;
+    void setStep (int pattern, int pad, int step, bool on);
+    void clearPattern (int pattern);
+    std::atomic<int> stepMask[numPatterns][numPads];
+    std::atomic<int> currentStep { -1 };   // для подсветки, -1 когда транспорт стоит
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -81,13 +90,16 @@ private:
         int pad = 0;
         float velocity = 1.0f;
         juce::int64 due = 0;
+        int kind = 0;   // 0: старт звука, 1: шаг секвенсора, 2: конец шага для Loop
     };
 
     void handleMidi (const juce::MidiMessage& m);
     void triggerHit (int pad, float velocity);      // учитывает Loop и Rate
     void startVoice (int pad, float velocity);      // запускает звук сразу
     void releaseLoop (int pad);
-    void addPending (int pad, float velocity, juce::int64 due);
+    void addPending (int pad, float velocity, juce::int64 due, int kind = 0);
+    void scheduleSteps (double ppqStart, int numSamples, double ppqPerSample, juce::int64 blockStart);
+    void releaseSeqHeld();
     void firePending (juce::int64 now);
     juce::int64 nextPendingDue() const;
     void renderRange (juce::AudioBuffer<float>& buffer, int startSample, int endSample);
@@ -111,8 +123,14 @@ private:
     std::atomic<float>* rateP[numPads]      {};
     std::atomic<float>* stepP[numPads]      {};
     std::atomic<float>* fadeP[numPads]      {};
+    std::atomic<float>* seqOnP    = nullptr;
+    std::atomic<float>* swingP    = nullptr;
+    std::atomic<float>* patternP  = nullptr;
+    std::atomic<float>* seqLenP   = nullptr;
+    bool seqHeld[numPads] {};
+    bool wasPlaying = false;
 
-    static constexpr int maxPending = 128;
+    static constexpr int maxPending = 256;
     Pending pending[maxPending];
     int hitCount[numPads] {};
     juce::int64 sampleCounter = 0;   // сколько сэмплов прошло с начала работы
